@@ -44,6 +44,8 @@ int main(void){
   for (int i = 0; i < formatContext->nb_streams; i++) {
     if (formatContext->streams[i]->codecpar->codec_type== AVMEDIA_TYPE_VIDEO) {
       videoStream = i;
+      
+
       printf("%d",videoStream);
       break;
     }
@@ -78,7 +80,6 @@ int main(void){
   Image image = GenImageColor(codecContext->width, codecContext->height, BLACK);
   Texture2D texture = LoadTextureFromImage(image);
 
-  SetTargetFPS(60);
 
   while (!WindowShouldClose())
   {
@@ -127,7 +128,6 @@ int main(void){
     ClearBackground(RAYWHITE);
     DrawTexture(texture, 0, 0, WHITE);
     EndDrawing();
-
 
   }
   UnloadTexture(texture);

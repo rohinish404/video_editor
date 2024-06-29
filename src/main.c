@@ -3,6 +3,7 @@
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
 #include <libavutil/time.h>
+#include <stdbool.h>
 
 #define MAX_QUEUE_SIZE 30
 
@@ -65,6 +66,10 @@ int decode_video(AVCodecContext *avctx, AVFrame *frame, int *got_frame, AVPacket
 int main(void) {
   const int screenWidth = 800;
   const int screenHeight = 450;
+
+  bool isPlaying = true;
+
+
 
   InitWindow(screenWidth, screenHeight, "Video Player");
 
@@ -140,35 +145,39 @@ int main(void) {
       }
       av_packet_unref(packet);
     }
+    if (IsKeyPressed(KEY_SPACE)){
+      isPlaying = !isPlaying;
 
+    }
     if (frameQueue.size > 0) {
-      AVFrame *next_frame = pop_queue(&frameQueue);
-      pts = next_frame->pts;
-      struct SwsContext *sws_ctx = sws_getContext(
-        codecContext->width, codecContext->height, codecContext->pix_fmt,
-        codecContext->width, codecContext->height, AV_PIX_FMT_RGBA,
-        SWS_BILINEAR, NULL, NULL, NULL
-      );
+      if(isPlaying == true){
+        AVFrame *next_frame = pop_queue(&frameQueue);
+        pts = next_frame->pts;
+        struct SwsContext *sws_ctx = sws_getContext(
+          codecContext->width, codecContext->height, codecContext->pix_fmt,
+          codecContext->width, codecContext->height, AV_PIX_FMT_RGBA,
+          SWS_BILINEAR, NULL, NULL, NULL
+        );
 
-      uint8_t *pixels = malloc(codecContext->width * codecContext->height * 4);
-      uint8_t *dest[4] = {pixels, NULL, NULL, NULL};
-      int dest_linesize[4] = {codecContext->width * 4, 0, 0, 0};
+        uint8_t *pixels = malloc(codecContext->width * codecContext->height * 4);
+        uint8_t *dest[4] = {pixels, NULL, NULL, NULL};
+        int dest_linesize[4] = {codecContext->width * 4, 0, 0, 0};
 
-      sws_scale(sws_ctx, (const uint8_t * const*)next_frame->data,
-                next_frame->linesize, 0, codecContext->height, dest, dest_linesize);
+        sws_scale(sws_ctx, (const uint8_t * const*)next_frame->data,
+                  next_frame->linesize, 0, codecContext->height, dest, dest_linesize);
 
-      UpdateTexture(texture, pixels);
-      free(pixels);
+        UpdateTexture(texture, pixels);
+        free(pixels);
 
-      sws_freeContext(sws_ctx);
-      av_frame_unref(next_frame);
+        sws_freeContext(sws_ctx);
+        av_frame_unref(next_frame);
+      }
     }
 
     BeginDrawing();
     ClearBackground(RAYWHITE);
     DrawTexture(texture, 0, 0, WHITE);
     DrawRectangle(10, 390, duration/duration*(screenWidth-50),50,BLACK);
-    printf("pts %f\n",(float)(((float)pts/(float)duration)+10));
     DrawRectangle((float)((((float)pts/(float)duration)*750)+10),390,10,50,RED);
     EndDrawing();
   }

@@ -3,16 +3,24 @@
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
 #include <libavutil/time.h>
+#include <libswresample/swresample.h>
 #include <stdbool.h>
 
 #define MAX_QUEUE_SIZE 30
-
+#define AUDIO_BUFFER_SIZE 4096
 typedef struct {
   AVFrame *frames[MAX_QUEUE_SIZE];
   size_t read_index;
   size_t write_index;
   size_t size;
 } FrameQueue;
+
+typedef struct {
+  AVFrame *frames[MAX_QUEUE_SIZE];
+  size_t read_index;
+  size_t write_index;
+  size_t size;
+} AudioQueue;
 
 void init_queue(FrameQueue *frameQueue) {
   for (size_t i = 0; i < MAX_QUEUE_SIZE; ++i) {
@@ -33,6 +41,32 @@ int push_queue(FrameQueue *queue, AVFrame *src) {
 }
 
 AVFrame *pop_queue(FrameQueue *q) {
+  if (q->size <= 0) return NULL;
+  AVFrame* frame = q->frames[q->read_index];
+  q->read_index = (q->read_index + 1) % MAX_QUEUE_SIZE;
+  q->size--;
+  return frame;
+}
+
+void init_audio_queue(AudioQueue *audioQueue) {
+  for (size_t i = 0; i < MAX_QUEUE_SIZE; ++i) {
+    audioQueue->frames[i] = av_frame_alloc();
+  }
+  audioQueue->write_index = 0;
+  audioQueue->read_index = 0;
+  audioQueue->size = 0;
+}
+
+int push_audio_queue(AudioQueue *queue, AVFrame *src) {
+  if (queue->size >= MAX_QUEUE_SIZE) return -1;
+  av_frame_unref(queue->frames[queue->write_index]);
+  av_frame_ref(queue->frames[queue->write_index], src);
+  queue->write_index = (queue->write_index + 1) % MAX_QUEUE_SIZE;
+  queue->size++;
+  return 0;
+}
+
+AVFrame *pop_audio_queue(AudioQueue *q) {
   if (q->size <= 0) return NULL;
   AVFrame* frame = q->frames[q->read_index];
   q->read_index = (q->read_index + 1) % MAX_QUEUE_SIZE;
@@ -72,7 +106,7 @@ int main(void) {
 
 
   InitWindow(screenWidth, screenHeight, "Video Player");
-
+  InitAudioDevice();
   AVFormatContext *formatContext = NULL;
   if (avformat_open_input(&formatContext, "assets/sunset.mp4", NULL, NULL) != 0) {
     printf("Couldn't open video file\n");
@@ -85,9 +119,17 @@ int main(void) {
   }
 
   int videoStream = -1;
+  int audioStream = -1;
   for (int i = 0; i < formatContext->nb_streams; i++) {
     if (formatContext->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
       videoStream = i;
+      break;
+    }
+  }
+
+  for (int i = 0; i < formatContext->nb_streams; i++) {
+    if (formatContext->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+      audioStream = i;
       break;
     }
   }
@@ -96,6 +138,11 @@ int main(void) {
     return -1;
   }
 
+  if (audioStream == -1) {
+    printf("Couldn't find a audio stream\n");
+    return -1;
+  }
+  // video
   AVCodecContext *codecContext = avcodec_alloc_context3(NULL);
   if (!codecContext) {
     fprintf(stderr, "Failed to allocate codec context\n");
@@ -106,6 +153,7 @@ int main(void) {
     fprintf(stderr, "Failed to copy codec parameters to codec context\n");
     return -1;
   }
+
   int duration = formatContext->streams[videoStream]->duration;
   printf("duration %d\n",duration);
   int pts;
@@ -119,9 +167,47 @@ int main(void) {
     printf("Couldn't open codec\n");
     return -1;
   }
+  // audio
+
+  AVCodecContext *audiocodecContext = avcodec_alloc_context3(NULL);
+  if (!audiocodecContext) {
+    fprintf(stderr, "Failed to allocate codec context\n");
+    return -1;
+  }
+
+  if (avcodec_parameters_to_context(audiocodecContext, formatContext->streams[audioStream]->codecpar) < 0) {
+    fprintf(stderr, "Failed to copy codec parameters to codec context\n");
+    return -1;
+  }
+  const AVCodec *audioCodec = avcodec_find_decoder(audiocodecContext->codec_id);
+  if (audioCodec == NULL) {
+    printf("Unsupported codec\n");
+    return -1;
+  }
+
+  if (avcodec_open2(audiocodecContext, audioCodec, NULL) < 0) {
+    printf("Couldn't open codec\n");
+    return -1;
+  }
+  ///////////////
 
   FrameQueue frameQueue;
   init_queue(&frameQueue);
+
+  AudioQueue audioQueue;
+  init_audio_queue(&audioQueue);
+
+  AVChannelLayout input_layout = audiocodecContext->ch_layout;
+  SwrContext *swrContext = swr_alloc();
+  int retu = swr_alloc_set_opts2(&swrContext, &(AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO, AV_SAMPLE_FMT_S16, 44100,
+                                 &input_layout, audiocodecContext->sample_fmt,
+                                 audiocodecContext->sample_rate, 0, NULL);
+
+  swr_init(swrContext);
+
+  AudioStream audioStreamPlay = LoadAudioStream(44100, 16, 2);
+  PlayAudioStream(audioStreamPlay);
+  SetAudioStreamVolume(audioStreamPlay,0.5f);
 
   AVFrame *frame = av_frame_alloc();
   AVPacket *packet = av_packet_alloc();
@@ -143,7 +229,32 @@ int main(void) {
           push_queue(&frameQueue, frame);
         }
       }
+
+      if (packet->stream_index == audioStream) {
+        int got_frame = 0;
+        int ret = decode_video(audiocodecContext, frame, &got_frame, packet);
+
+        if (ret < 0) {
+          printf("Error decoding video\n");
+          break;
+        }
+        if (got_frame) {
+          push_audio_queue(&audioQueue, frame);
+        }
+      }
       av_packet_unref(packet);
+    }
+    if(IsAudioStreamProcessed(audioStreamPlay)){
+      AVFrame *audioFrame = pop_audio_queue(&audioQueue);
+      if (audioFrame) {
+        uint8_t *audioBuff = malloc(AUDIO_BUFFER_SIZE);
+        int outSamples = swr_convert(swrContext, &audioBuff, AUDIO_BUFFER_SIZE/4,
+                                     (const uint8_t **)audioFrame->data, audioFrame->nb_samples);
+        UpdateAudioStream(audioStreamPlay, audioBuff, outSamples);
+        free(audioBuff);
+        av_frame_unref(audioFrame);
+      }
+
     }
     if (IsKeyPressed(KEY_SPACE)){
       isPlaying = !isPlaying;
@@ -188,7 +299,11 @@ int main(void) {
   for (int i = 0; i < MAX_QUEUE_SIZE; i++) {
     av_frame_free(&frameQueue.frames[i]);
   }
+  for (int i = 0; i < MAX_QUEUE_SIZE; i++) {
+    av_frame_free(&audioQueue.frames[i]);
+  }
   avcodec_free_context(&codecContext);
+  avcodec_free_context(&audiocodecContext);
   avformat_close_input(&formatContext);
 
   CloseWindow();
